@@ -12,7 +12,7 @@ import tweepy
 from time import localtime, strftime
 import paho.mqtt.publish as mqttpublish
 
-from ConfigParser import SafeConfigParser
+from configparser import SafeConfigParser
 from tweepy import OAuthHandler as TweetHandler
 from slackclient import SlackClient
 
@@ -195,43 +195,54 @@ def send_alert(message):
             telegram(message)
 
 
-def send_appliance_active_message():
-    send_alert(start_message)
+def send_appliance_active_message(appliance: str):
+    send_alert("{}: {}".format(appliance, start_message))
     global appliance_active
-    appliance_active = True
+    appliance_active[appliance] = True
 
 
-def send_appliance_inactive_message():
-    send_alert(end_message)
+def send_appliance_inactive_message(appliance: str):
+    send_alert("{}: {}".format(appliance, end_message))
     global appliance_active
-    appliance_active = False
+    appliance_active[appliance] = False
 
 
-def vibrated(x):
+def vibrated_washer(x):
+    global WASHER
+    vibrated(WASHER)
+
+
+def vibrated_dryer(x):
+    global DRYER 
+    vibrated(DRYER)
+
+
+def vibrated(appliance: str):
     global vibrating
     global last_vibration_time
     global start_vibration_time
-    logging.debug('Vibrated')
-    last_vibration_time = time.time()
-    if not vibrating:
-        start_vibration_time = last_vibration_time
-        vibrating = True
 
+    logging.debug("{} Vibrated".format(appliance))
+    last_vibration_time[appliance] = time.time()
+    if not vibrating[appliance]:
+        start_vibration_time[appliance] = last_vibration_time[appliance]
+        vibrating[appliance] = True
 
 def heartbeat():
     current_time = time.time()
     logging.debug("HB at {}".format(current_time))
     global vibrating
-    delta_vibration = last_vibration_time - start_vibration_time
-    if (vibrating and delta_vibration > begin_seconds
-            and not appliance_active):
-        send_appliance_active_message()
-    if (not vibrating and appliance_active
-            and current_time - last_vibration_time > end_seconds):
-        send_appliance_inactive_message()
-    vibrating = current_time - last_vibration_time < 2
-    threading.Timer(1, heartbeat).start()
 
+    for appliance in APPLIANCES:
+        delta_vibration = last_vibration_time[appliance] - start_vibration_time[appliance]
+        if (vibrating[appliance] and delta_vibration > begin_seconds
+                and not appliance_active[appliance]):
+            send_appliance_active_message(appliance)
+        if (not vibrating[appliance] and appliance_active[appliance]
+                and current_time - last_vibration_time[appliance] > end_seconds):
+            send_appliance_inactive_message(appliance)
+        vibrating[appliance] = current_time - last_vibration_time[appliance] < 2
+    threading.Timer(1, heartbeat).start()
 
 logging.basicConfig(format='%(message)s', level=logging.INFO)
 
@@ -239,15 +250,35 @@ if len(sys.argv) == 1:
     logging.critical("No config file specified")
     sys.exit(1)
 
-vibrating = False
-appliance_active = False
-last_vibration_time = time.time()
-start_vibration_time = last_vibration_time
+WASHER = "washer"
+DRYER = "dryer"
+APPLIANCES = [WASHER, DRYER]
+
+vibrating = {
+    WASHER: False,
+    DRYER: False
+}
+
+appliance_active = {
+    WASHER: False,
+    DRYER: False
+}
+
+last_vibration_time = {
+    WASHER: time.time(),
+    DRYER: time.time(),
+}
+
+start_vibration_time = {
+    WASHER: last_vibration_time[WASHER],
+    DRYER: last_vibration_time[DRYER]
+}
 
 config = SafeConfigParser()
 config.read(sys.argv[1])
 verbose = config.getboolean('main', 'VERBOSE')
-sensor_pin = config.getint('main', 'SENSOR_PIN')
+dryer_sensor_pin = config.getint('main', 'DRYER_SENSOR_PIN')
+washer_sensor_pin = config.getint('main', 'WASHER_SENSOR_PIN')
 begin_seconds = config.getint('main', 'SECONDS_TO_START')
 end_seconds = config.getint('main', 'SECONDS_TO_END')
 pushbullet_api_key = config.get('pushbullet', 'API_KEY')
@@ -290,11 +321,17 @@ send_alert(config.get('main', 'BOOT_MESSAGE'))
 
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(sensor_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.add_event_detect(sensor_pin, GPIO.RISING)
-GPIO.add_event_callback(sensor_pin, vibrated)
 
-logging.info('Running config file {} monitoring GPIO pin {}'\
-      .format(sys.argv[1], str(sensor_pin)))
+GPIO.setup(dryer_sensor_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.add_event_detect(dryer_sensor_pin, GPIO.RISING)
+GPIO.add_event_callback(dryer_sensor_pin, vibrated_dryer)
+
+GPIO.setup(washer_sensor_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.add_event_detect(washer_sensor_pin, GPIO.RISING)
+GPIO.add_event_callback(washer_sensor_pin, vibrated_washer)
+
+logging.info('Running config file {}'.format(sys.argv[1]))
+logging.info('Monitoring dryer on GPIO pin {}'.format(str(dryer_sensor_pin)))
+logging.info('Monitoring washer on GPIO pin {}'.format(str(washer_sensor_pin)))
 threading.Timer(1, heartbeat).start()
 
